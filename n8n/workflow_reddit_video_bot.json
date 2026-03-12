@@ -1,0 +1,198 @@
+{
+  "name": "Reddit Video Maker Bot - Automatisierung",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Alle 6 Stunden",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:5000/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"subreddit\": \"{{ $json.subreddit || 'AskReddit' }}\",\n  \"post_id\": \"{{ $json.post_id || '' }}\"\n}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "trigger-generation",
+      "name": "Video generieren",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "amount": 120,
+        "unit": "seconds"
+      },
+      "id": "wait-node",
+      "name": "2 Min warten",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=http://localhost:5000/api/jobs/{{ $('Video generieren').item.json.job_id }}",
+        "options": {}
+      },
+      "id": "check-status",
+      "name": "Status prüfen",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [920, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-completed",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "completed",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-completed",
+      "name": "Fertig?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1140, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://localhost:5000/api/results",
+        "options": {}
+      },
+      "id": "get-results",
+      "name": "Ergebnisse abrufen",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1400, 200]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://localhost:5000/api/health",
+        "options": {}
+      },
+      "id": "health-check",
+      "name": "Health Check",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [250, 520]
+    }
+  ],
+  "connections": {
+    "Alle 6 Stunden": {
+      "main": [
+        [
+          {
+            "node": "Video generieren",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Video generieren": {
+      "main": [
+        [
+          {
+            "node": "2 Min warten",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2 Min warten": {
+      "main": [
+        [
+          {
+            "node": "Status prüfen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Status prüfen": {
+      "main": [
+        [
+          {
+            "node": "Fertig?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fertig?": {
+      "main": [
+        [
+          {
+            "node": "Ergebnisse abrufen",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "2 Min warten",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "reddit-video-maker-bot"
+  },
+  "tags": [
+    {
+      "name": "Reddit",
+      "id": "1"
+    },
+    {
+      "name": "Video",
+      "id": "2"
+    },
+    {
+      "name": "Automation",
+      "id": "3"
+    }
+  ]
+}
