@@ -1,0 +1,316 @@
+{
+  "name": "Reddit Video Maker - Vollständige Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "hours", "hoursInterval": 6 }]
+        }
+      },
+      "id": "node-schedule",
+      "name": "Zeitplan (alle 6h)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [200, 400],
+      "notes": "Auslöser: Alle 6 Stunden wird ein neues Video generiert."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://www.reddit.com/api/v1/access_token",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "grant_type", "value": "password" },
+            { "name": "username", "value": "={{ $credentials.reddit_username }}" },
+            { "name": "password", "value": "={{ $credentials.reddit_password }}" }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "node-reddit-auth",
+      "name": "1. Reddit OAuth Token",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 400],
+      "notes": "Reddit OAuth2 mit client_id/client_secret als Basic Auth. Gibt access_token zurück.",
+      "credentials": {
+        "httpBasicAuth": { "id": "reddit-api-creds", "name": "Reddit API Credentials" }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://oauth.reddit.com/r/{{ $('Konfiguration').item.json.subreddit }}/hot.json?limit=10",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $('1. Reddit OAuth Token').item.json.access_token }}" },
+            { "name": "User-Agent", "value": "n8n-reddit-video-bot/1.0" }
+          ]
+        },
+        "options": { "timeout": 10000 }
+      },
+      "id": "node-fetch-posts",
+      "name": "2. Posts abrufen",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 400],
+      "notes": "Holt die Top-Posts des konfigurierten Subreddits."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Konfiguration für den Workflow\nconst config = {\n  subreddit: 'AskReddit',\n  theme: 'dark',\n  max_comment_length: 500,\n  min_comment_length: 1,\n  min_comments: 20,\n  width: 1080,\n  height: 1920,\n  opacity: 0.9,\n  storymode: false,\n  bg_audio_volume: 0.15,\n  tts_provider: 'openai',\n  openai_voice: 'alloy',\n  openai_model: 'tts-1',\n  silence_duration: 0.3,\n  work_dir: '/tmp/reddit_video_' + Date.now(),\n};\n\nreturn [{ json: config }];"
+      },
+      "id": "node-config",
+      "name": "Konfiguration",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [200, 200],
+      "notes": "Zentrale Konfiguration. Hier alle Parameter anpassen."
+    },
+    {
+      "parameters": {
+        "jsCode": "const posts = $input.first().json.data.children;\nconst config = $('Konfiguration').first().json;\n\n// Filter: genug Kommentare, nicht NSFW, nicht stickied\nconst validPosts = posts.filter(p => {\n  const d = p.data;\n  return d.num_comments >= config.min_comments\n    && !d.stickied\n    && !d.over_18;\n});\n\nif (validPosts.length === 0) {\n  throw new Error('Keine passenden Posts gefunden!');\n}\n\n// Ersten passenden Post nehmen\nconst post = validPosts[0].data;\n\nreturn [{\n  json: {\n    thread_id: post.id,\n    thread_title: post.title,\n    thread_url: `https://www.reddit.com${post.permalink}`,\n    thread_post: post.selftext || '',\n    is_nsfw: post.over_18,\n    upvotes: post.score,\n    num_comments: post.num_comments,\n    subreddit: post.subreddit,\n  }\n}];"
+      },
+      "id": "node-select-post",
+      "name": "3. Post auswählen",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [920, 400],
+      "notes": "Wählt den ersten passenden Post aus (genug Kommentare, kein NSFW)."
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://oauth.reddit.com/comments/{{ $('3. Post auswählen').item.json.thread_id }}.json?limit=10&sort=top",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $('1. Reddit OAuth Token').item.json.access_token }}" },
+            { "name": "User-Agent", "value": "n8n-reddit-video-bot/1.0" }
+          ]
+        },
+        "options": { "timeout": 10000 }
+      },
+      "id": "node-fetch-comments",
+      "name": "4. Kommentare abrufen",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1160, 400],
+      "notes": "Holt die Top-Kommentare des ausgewählten Posts."
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst config = $('Konfiguration').first().json;\nconst postInfo = $('3. Post auswählen').first().json;\n\n// data ist ein Array: [post_data, comments_data]\nconst commentsListing = Array.isArray(data) ? data[1] : data;\nconst children = commentsListing?.data?.children || [];\n\nconst comments = children\n  .filter(c => {\n    if (c.kind !== 't1') return false;\n    const body = c.data.body || '';\n    return body !== '[removed]'\n      && body !== '[deleted]'\n      && !c.data.stickied\n      && body.length >= config.min_comment_length\n      && body.length <= config.max_comment_length;\n  })\n  .map((c, idx) => ({\n    index: idx,\n    comment_id: c.data.id,\n    comment_body: c.data.body,\n    comment_url: c.data.permalink,\n    author: c.data.author,\n  }));\n\n// Arbeitsverzeichnis erstellen\nconst workDir = config.work_dir;\n\nreturn [{\n  json: {\n    thread_id: postInfo.thread_id,\n    thread_title: postInfo.thread_title,\n    thread_url: postInfo.thread_url,\n    thread_post: postInfo.thread_post,\n    comments: comments,\n    comment_ids: comments.map(c => c.comment_id).join(','),\n    work_dir: workDir,\n    total_comments: comments.length,\n  }\n}];"
+      },
+      "id": "node-parse-comments",
+      "name": "5. Kommentare verarbeiten",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1400, 400],
+      "notes": "Filtert und strukturiert die Kommentare."
+    },
+    {
+      "parameters": {
+        "command": "=mkdir -p {{ $json.work_dir }}/audio {{ $json.work_dir }}/screenshots && echo '{\"status\": \"ready\", \"work_dir\": \"{{ $json.work_dir }}\"}'"
+      },
+      "id": "node-setup-dirs",
+      "name": "6. Verzeichnisse anlegen",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1640, 400],
+      "notes": "Erstellt die temporären Arbeitsverzeichnisse."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Erstelle einzelne Items für Titel + jeden Kommentar\nconst data = $('5. Kommentare verarbeiten').first().json;\nconst config = $('Konfiguration').first().json;\n\nconst items = [];\n\n// Titel\nitems.push({\n  json: {\n    type: 'title',\n    text: data.thread_title,\n    filename: 'title',\n    index: -1,\n    work_dir: data.work_dir,\n    voice: config.openai_voice,\n    model: config.openai_model,\n  }\n});\n\n// Kommentare\nfor (const comment of data.comments) {\n  items.push({\n    json: {\n      type: 'comment',\n      text: comment.comment_body,\n      filename: String(comment.index),\n      index: comment.index,\n      work_dir: data.work_dir,\n      voice: config.openai_voice,\n      model: config.openai_model,\n    }\n  });\n}\n\nreturn items;"
+      },
+      "id": "node-split-texts",
+      "name": "7. Texte aufteilen",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1880, 400],
+      "notes": "Erstellt ein Item pro Text (Titel + jeder Kommentar) für die TTS-Verarbeitung."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/audio/speech",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"{{ $json.model }}\",\n  \"voice\": \"{{ $json.voice }}\",\n  \"input\": {{ JSON.stringify($json.text) }},\n  \"response_format\": \"mp3\"\n}",
+        "options": {
+          "response": { "response": { "responseFormat": "file" } },
+          "timeout": 30000
+        }
+      },
+      "id": "node-tts-openai",
+      "name": "8a. OpenAI TTS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2120, 300],
+      "notes": "Generiert MP3-Audio via OpenAI TTS API. Alternative: ElevenLabs oder Google TTS.",
+      "credentials": {
+        "httpHeaderAuth": { "id": "openai-api-key", "name": "OpenAI API Key" }
+      }
+    },
+    {
+      "parameters": {
+        "command": "=curl -s 'https://api.openai.com/v1/audio/speech' \\\n  -H 'Authorization: Bearer $OPENAI_API_KEY' \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"model\": \"{{ $json.model }}\", \"voice\": \"{{ $json.voice }}\", \"input\": {{ JSON.stringify($json.text) }}, \"response_format\": \"mp3\"}' \\\n  -o '{{ $json.work_dir }}/audio/{{ $json.filename }}.mp3' \\\n  && python3 -c \"from mutagen.mp3 import MP3; a=MP3('{{ $json.work_dir }}/audio/{{ $json.filename }}.mp3'); print('{\\\"duration\\\": ' + str(a.info.length) + ', \\\"file\\\": \\\"{{ $json.filename }}\\\"}')\" \\\n  || echo '{\"error\": \"TTS failed for {{ $json.filename }}\"}'"
+      },
+      "id": "node-tts-command",
+      "name": "8b. TTS (via Command)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [2120, 520],
+      "notes": "Alternative TTS via curl + Dateisystem. Gibt Audio-Dauer zurück."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Sammle alle Audio-Dauern und berechne Timestamps\nconst items = $input.all();\nconst config = $('Konfiguration').first().json;\nconst silence = config.silence_duration || 0.3;\n\nconst durations = [];\nlet currentTime = 0;\n\nfor (const item of items) {\n  const data = item.json;\n  if (data.error) continue;\n  \n  const duration = data.duration || 3; // Fallback\n  durations.push({\n    file: data.file || data.filename,\n    start: currentTime,\n    end: currentTime + duration,\n    duration: duration,\n  });\n  currentTime += duration + silence;\n}\n\nconst workDir = $('5. Kommentare verarbeiten').first().json.work_dir;\n\nreturn [{\n  json: {\n    durations: durations,\n    total_length: currentTime,\n    work_dir: workDir,\n  }\n}];"
+      },
+      "id": "node-calc-durations",
+      "name": "9. Dauern berechnen",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2380, 400],
+      "notes": "Berechnet Start/End-Zeiten für jedes Audio-Segment (für Overlay-Timing)."
+    },
+    {
+      "parameters": {
+        "command": "=echo '{{ JSON.stringify($json.durations) }}' > {{ $json.work_dir }}/durations.json && echo 'durations.json written'"
+      },
+      "id": "node-write-durations",
+      "name": "10. Dauern speichern",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [2620, 400],
+      "notes": "Schreibt die Timing-Daten als JSON für das FFmpeg-Skript."
+    },
+    {
+      "parameters": {
+        "command": "=cd /path/to/RedditVideoMakerBot && python3 n8n/screenshot_helper.py \\\n  --url '{{ $('5. Kommentare verarbeiten').first().json.thread_url }}' \\\n  --username '$REDDIT_USERNAME' \\\n  --password '$REDDIT_PASSWORD' \\\n  --output-dir '{{ $('5. Kommentare verarbeiten').first().json.work_dir }}/screenshots' \\\n  --comment-ids '{{ $('5. Kommentare verarbeiten').first().json.comment_ids }}' \\\n  --theme '{{ $('Konfiguration').first().json.theme }}' \\\n  --width {{ $('Konfiguration').first().json.width }} \\\n  --height {{ $('Konfiguration').first().json.height }}"
+      },
+      "id": "node-screenshots",
+      "name": "11. Screenshots erstellen",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [2620, 600],
+      "notes": "Erstellt Screenshots des Reddit-Posts und der Kommentare mit Playwright."
+    },
+    {
+      "parameters": {
+        "command": "=WORK_DIR='{{ $('5. Kommentare verarbeiten').first().json.work_dir }}' && \\\nyt-dlp -f 'bestvideo[height<=1080][ext=mp4]' \\\n  --no-playlist \\\n  -o \"$WORK_DIR/background_full.mp4\" \\\n  'https://www.youtube.com/watch?v=n_Dv4JMiwK8' && \\\nTOTAL_LENGTH={{ $json.total_length }} && \\\nVIDEO_DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 \"$WORK_DIR/background_full.mp4\" | cut -d. -f1) && \\\nMAX_START=$((VIDEO_DURATION - TOTAL_LENGTH - 10)) && \\\nSTART=$((RANDOM % MAX_START)) && \\\nffmpeg -y -hide_banner -loglevel warning \\\n  -ss $START -t $TOTAL_LENGTH \\\n  -i \"$WORK_DIR/background_full.mp4\" \\\n  -c copy \"$WORK_DIR/background.mp4\" && \\\necho '{\"status\": \"background ready\"}'"
+      },
+      "id": "node-download-bg-video",
+      "name": "12. Hintergrundvideo",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [2860, 300],
+      "notes": "Lädt Hintergrundvideo (Minecraft Parkour) und schneidet einen zufälligen Ausschnitt."
+    },
+    {
+      "parameters": {
+        "command": "=WORK_DIR='{{ $('5. Kommentare verarbeiten').first().json.work_dir }}' && \\\nyt-dlp -f 'bestaudio/best' --extract-audio --audio-format mp3 \\\n  --no-playlist \\\n  -o \"$WORK_DIR/bg_audio_full.%(ext)s\" \\\n  'https://www.youtube.com/watch?v=LTphVIore3A' && \\\nTOTAL_LENGTH={{ $('9. Dauern berechnen').first().json.total_length }} && \\\nffmpeg -y -hide_banner -loglevel warning \\\n  -t $TOTAL_LENGTH \\\n  -i \"$WORK_DIR/bg_audio_full.mp3\" \\\n  -c copy \"$WORK_DIR/background.mp3\" && \\\necho '{\"status\": \"background audio ready\"}'"
+      },
+      "id": "node-download-bg-audio",
+      "name": "13. Hintergrundmusik",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [2860, 500],
+      "notes": "Lädt Lofi-Hintergrundmusik und schneidet auf die richtige Länge."
+    },
+    {
+      "parameters": {
+        "command": "=cd /path/to/RedditVideoMakerBot && \\\nbash n8n/ffmpeg_compose.sh \\\n  --work-dir '{{ $('5. Kommentare verarbeiten').first().json.work_dir }}' \\\n  --width {{ $('Konfiguration').first().json.width }} \\\n  --height {{ $('Konfiguration').first().json.height }} \\\n  --opacity {{ $('Konfiguration').first().json.opacity }} \\\n  --bg-audio-volume {{ $('Konfiguration').first().json.bg_audio_volume }} \\\n  --output '{{ $('5. Kommentare verarbeiten').first().json.work_dir }}/final.mp4'"
+      },
+      "id": "node-compose-video",
+      "name": "14. Video zusammensetzen",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [3140, 400],
+      "notes": "FFmpeg: Kombiniert Hintergrundvideo + Audio + Screenshot-Overlays zum fertigen Video."
+    },
+    {
+      "parameters": {
+        "jsCode": "const workDir = $('5. Kommentare verarbeiten').first().json.work_dir;\nconst postInfo = $('3. Post auswählen').first().json;\nconst durations = $('9. Dauern berechnen').first().json;\n\nreturn [{\n  json: {\n    status: 'completed',\n    video_path: `${workDir}/final.mp4`,\n    thread_title: postInfo.thread_title,\n    thread_id: postInfo.thread_id,\n    subreddit: postInfo.subreddit,\n    total_comments: $('5. Kommentare verarbeiten').first().json.total_comments,\n    video_length_seconds: Math.ceil(durations.total_length),\n    work_dir: workDir,\n  }\n}];"
+      },
+      "id": "node-summary",
+      "name": "15. Zusammenfassung",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3380, 400],
+      "notes": "Fasst alle Ergebnisse zusammen und gibt den Video-Pfad aus."
+    }
+  ],
+  "connections": {
+    "Zeitplan (alle 6h)": {
+      "main": [[{ "node": "1. Reddit OAuth Token", "type": "main", "index": 0 }]]
+    },
+    "1. Reddit OAuth Token": {
+      "main": [[{ "node": "2. Posts abrufen", "type": "main", "index": 0 }]]
+    },
+    "2. Posts abrufen": {
+      "main": [[{ "node": "3. Post auswählen", "type": "main", "index": 0 }]]
+    },
+    "3. Post auswählen": {
+      "main": [[{ "node": "4. Kommentare abrufen", "type": "main", "index": 0 }]]
+    },
+    "4. Kommentare abrufen": {
+      "main": [[{ "node": "5. Kommentare verarbeiten", "type": "main", "index": 0 }]]
+    },
+    "5. Kommentare verarbeiten": {
+      "main": [[{ "node": "6. Verzeichnisse anlegen", "type": "main", "index": 0 }]]
+    },
+    "6. Verzeichnisse anlegen": {
+      "main": [[{ "node": "7. Texte aufteilen", "type": "main", "index": 0 }]]
+    },
+    "7. Texte aufteilen": {
+      "main": [[{ "node": "8b. TTS (via Command)", "type": "main", "index": 0 }]]
+    },
+    "8b. TTS (via Command)": {
+      "main": [[{ "node": "9. Dauern berechnen", "type": "main", "index": 0 }]]
+    },
+    "9. Dauern berechnen": {
+      "main": [[
+        { "node": "10. Dauern speichern", "type": "main", "index": 0 },
+        { "node": "11. Screenshots erstellen", "type": "main", "index": 0 },
+        { "node": "12. Hintergrundvideo", "type": "main", "index": 0 },
+        { "node": "13. Hintergrundmusik", "type": "main", "index": 0 }
+      ]]
+    },
+    "10. Dauern speichern": {
+      "main": [[{ "node": "14. Video zusammensetzen", "type": "main", "index": 0 }]]
+    },
+    "11. Screenshots erstellen": {
+      "main": [[{ "node": "14. Video zusammensetzen", "type": "main", "index": 0 }]]
+    },
+    "12. Hintergrundvideo": {
+      "main": [[{ "node": "14. Video zusammensetzen", "type": "main", "index": 0 }]]
+    },
+    "13. Hintergrundmusik": {
+      "main": [[{ "node": "14. Video zusammensetzen", "type": "main", "index": 0 }]]
+    },
+    "14. Video zusammensetzen": {
+      "main": [[{ "node": "15. Zusammenfassung", "type": "main", "index": 0 }]]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "instanceId": "reddit-video-full-pipeline"
+  },
+  "tags": [
+    { "name": "Reddit", "id": "1" },
+    { "name": "Video", "id": "2" },
+    { "name": "Full Pipeline", "id": "3" }
+  ]
+}
